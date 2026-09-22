@@ -1,0 +1,45 @@
+# Template. Copy to default.conf, substitute the token, create the Secret,
+# then delete the copy. default.conf is gitignored.
+#
+# DO NOT change `proxy_set_header Host 127.0.0.1:8000` to $host. The MCP
+# Python SDK validates the Host header as DNS-rebinding protection and
+# rejects anything that is not localhost. Changing it gives you a healthy
+# 2/2 pod that fails every request.
+
+map $http_x_forwarded_proto $fwd_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+
+server {
+    listen 8080;
+    server_name _;
+
+    # SSE requires these - no buffering, long timeouts
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 86400s;
+    proxy_send_timeout 86400s;
+
+    set $expected_token "REPLACE_ME";
+
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+    location / {
+        if ($http_authorization != "Bearer $expected_token") {
+            return 401;
+        }
+
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host 127.0.0.1:8000;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $fwd_proto;
+        proxy_set_header Connection '';
+        proxy_http_version 1.1;
+        chunked_transfer_encoding off;
+    }
+}

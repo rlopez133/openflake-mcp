@@ -1,0 +1,7 @@
+# Never commit these
+.env
+*.env
+!.env.example
+nginx/default.conf
+*.token
+secrets.yaml

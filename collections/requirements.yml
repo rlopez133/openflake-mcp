@@ -1,0 +1,5 @@
+---
+# AAP reads this automatically when it syncs the project.
+collections:
+  - name: kubernetes.core
+    version: ">=3.0.0"

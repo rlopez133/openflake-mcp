@@ -1,0 +1,150 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openflake-mcp
+  labels:
+    app: openflake-mcp
+  annotations:
+    image.openshift.io/triggers: |
+      [{
+        "from": {"kind": "ImageStreamTag", "name": "openflake-mcp:latest"},
+        "fieldPath": "spec.template.spec.containers[?(@.name==\"openflake-mcp\")].image"
+      }]
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openflake-mcp
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: openflake-mcp
+    spec:
+      containers:
+        # App container. Port 8000, never exposed outside the pod.
+        - name: openflake-mcp
+          image: openflake-mcp:latest
+          imagePullPolicy: Always
+          ports:
+            - name: app
+              containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: openflake-mcp-env
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+
+        # Bearer token gate. The only thing between the Route and OpenFlake.
+        # Stock nginx:alpine will NOT run here - needs root for port 80.
+        # Docker Hub blocked? Use registry.access.redhat.com/ubi9/nginx-124
+        # and change mountPath to /opt/app-root/etc/nginx.d/default.conf
+        - name: nginx
+          image: docker.io/nginxinc/nginx-unprivileged:alpine
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+
+      volumes:
+        - name: nginx-conf
+          secret:
+            secretName: openflake-mcp-nginx-conf
+            defaultMode: 0440
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openflake-mcp
+  labels:
+    app: openflake-mcp
+spec:
+  type: ClusterIP
+  selector:
+    app: openflake-mcp
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: openflake-mcp
+  labels:
+    app: openflake-mcp
+  annotations:
+    # MCP holds a long-lived SSE stream. The router default of 30s kills it.
+    haproxy.router.openshift.io/timeout: 1h
+spec:
+  to:
+    kind: Service
+    name: openflake-mcp
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

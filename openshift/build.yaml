@@ -1,0 +1,47 @@
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: openflake-mcp
+  labels:
+    app: openflake-mcp
+spec:
+  lookupPolicy:
+    local: true
+
+---
+# Git source, not Binary. The cluster pulls the code itself, so nothing
+# has to be uploaded from a laptop and any teammate can trigger a build.
+#
+# Set GIT_URI and GIT_REF before applying; the playbook substitutes both.
+#
+# This clones anonymously because the repo is public. If it ever goes private
+# the build fails at clone, and you need a source secret:
+#   oc create secret generic git-creds --from-literal=username=USER \
+#     --from-literal=password=TOKEN --type=kubernetes.io/basic-auth
+# then add  sourceSecret: {name: git-creds}  under spec.
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: openflake-mcp
+  labels:
+    app: openflake-mcp
+spec:
+  source:
+    type: Git
+    git:
+      uri: GIT_URI
+      ref: GIT_REF
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Containerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: openflake-mcp:latest
+  triggers:
+    - type: ConfigChange
+  resources:
+    limits:
+      memory: 2Gi
