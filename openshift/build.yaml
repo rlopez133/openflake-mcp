@@ -10,8 +10,7 @@ spec:
     local: true
 
 ---
-# Git source, not Binary. The cluster pulls the code itself, so nothing
-# has to be uploaded from a laptop and any teammate can trigger a build.
+# Git source, not Binary. The cluster pulls the code itself.
 #
 # Set GIT_URI and GIT_REF before applying; the playbook substitutes both.
 #
@@ -40,8 +39,6 @@ spec:
     to:
       kind: ImageStreamTag
       name: openflake-mcp:latest
-  triggers:
-    - type: ConfigChange
   resources:
     limits:
       memory: 2Gi
