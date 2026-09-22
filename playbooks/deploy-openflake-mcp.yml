@@ -1,20 +1,5 @@
 ---
 # Deploy the OpenFlake MCP server to OpenShift, from AAP or from a laptop.
-#
-# Runs entirely against localhost — every task talks to the cluster over the
-# API, so there is nothing to put in an inventory. Attach an OpenShift API
-# credential to the job template and AAP exports K8S_AUTH_HOST / K8S_AUTH_API_KEY
-# / K8S_AUTH_VERIFY_SSL, which kubernetes.core picks up on its own. Do not pass
-# host or api_key in here.
-#
-# Laptop run instead:
-#   oc login <api-url>
-#   ansible-playbook playbooks/deploy-openflake-mcp.yml \
-#     -e openflake_instance_url=https://your.openflake.example.com/ \
-#     -e openflake_username=svc-mcp \
-#     -e openflake_password=... \
-#     -e openflake_git_uri=https://github.com/rlopez133/openflake-mcp.git
-
 - name: Deploy the OpenFlake MCP server to OpenShift
   hosts: localhost
   connection: local
@@ -25,7 +10,7 @@
     # openflake_instance_url:  https://your.openflake.example.com/   (trailing slash)
     # openflake_username:      service account user
     # openflake_password:      service account password
-    # openflake_git_uri:       https://github.com/rlopez133/openflake-mcp.git
+    openflake_git_uri: https://github.com/rlopez133/openflake-mcp.git
 
     # --- Optional. ------------------------------------------------------
     openflake_namespace: openflake-mcp
@@ -158,71 +143,15 @@
              | replace('GIT_REF', openflake_git_ref)
              | from_yaml_all | list }}
 
-    - name: Read back the BuildConfig spec
-      kubernetes.core.k8s_info:
-        api_version: build.openshift.io/v1
-        kind: BuildConfig
-        name: "{{ app_name }}"
+    - name: Start a build and wait for it
+      community.okd.openshift_build:
         namespace: "{{ openflake_namespace }}"
-      register: buildconfig
+        build_config_name: "{{ app_name }}"
+        state: started
+        wait: true
+        wait_timeout: "{{ openflake_build_timeout }}"
+      register: build_result
 
-    - name: Name this build
-      ansible.builtin.set_fact:
-        build_name: "{{ app_name }}-{{ now(utc=true, fmt='%Y%m%d%H%M%S') }}"
-
-    # Creating a Build object is the kubernetes.core way to do what
-    # `oc start-build` does. `oc` posts to the buildconfigs/instantiate
-    # subresource, which no kubernetes.core module exposes. A Build is a
-    # BuildConfig minus the fields stripped below, plus triggeredBy.
-    - name: Start a build
-      kubernetes.core.k8s:
-        state: present
-        namespace: "{{ openflake_namespace }}"
-        definition:
-          apiVersion: build.openshift.io/v1
-          kind: Build
-          metadata:
-            name: "{{ build_name }}"
-            labels:
-              app: "{{ app_name }}"
-              buildconfig: "{{ app_name }}"
-            annotations:
-              openshift.io/build-config.name: "{{ app_name }}"
-          spec: >-
-            {{ buildconfig.resources[0].spec
-               | dict2items
-               | rejectattr('key', 'in', ['triggers', 'runPolicy',
-                                          'successfulBuildsHistoryLimit',
-                                          'failedBuildsHistoryLimit'])
-               | items2dict
-               | combine({'serviceAccount': 'builder',
-                          'triggeredBy': [{'message': 'Started by Ansible'}]}) }}
-
-    - name: Wait for the build to finish
-      kubernetes.core.k8s_info:
-        api_version: build.openshift.io/v1
-        kind: Build
-        name: "{{ build_name }}"
-        namespace: "{{ openflake_namespace }}"
-      register: build_status
-      until: >-
-        build_status.resources | length > 0 and
-        build_status.resources[0].status.phase in
-          ['Complete', 'Failed', 'Error', 'Cancelled']
-      retries: "{{ (openflake_build_timeout | int / 10) | int }}"
-      delay: 10
-
-    - name: Fail if the build did not succeed
-      ansible.builtin.fail:
-        msg: >-
-          Build {{ build_name }} ended in
-          {{ build_status.resources[0].status.phase }}:
-          {{ build_status.resources[0].status.message | default('no message') }}.
-          Logs: oc logs build/{{ build_name }} -n {{ openflake_namespace }}
-      when: build_status.resources[0].status.phase != 'Complete'
-
-    # A Complete build that never pushed leaves the Deployment in
-    # ImagePullBackOff, which is a much harder failure to read than this.
     - name: Confirm the image tag was pushed
       kubernetes.core.k8s_info:
         api_version: image.openshift.io/v1
