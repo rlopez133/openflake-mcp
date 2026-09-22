@@ -59,27 +59,13 @@
             labels:
               app: "{{ app_name }}"
 
-    - name: Write the OpenFlake connection secret
-      kubernetes.core.k8s:
-        state: present
-        namespace: "{{ openflake_namespace }}"
-        definition:
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: "{{ app_name }}-env"
-            labels:
-              app: "{{ app_name }}"
-          type: Opaque
-          stringData:
-            OPENFLAKE_INSTANCE_URL: "{{ openflake_instance_url_norm }}"
-            OPENFLAKE_USERNAME: "{{ openflake_username }}"
-            OPENFLAKE_PASSWORD: "{{ openflake_password }}"
-      no_log: true
-
     # ---------------------------------------------------------------------
     # Bearer token. nginx is the only thing between a public Route and
     # OpenFlake, so this secret is the entire authentication story.
+    #
+    # Resolved before the env secret is written, because the token is stored
+    # there too as OPENFLAKE_BEARER_TOKEN so there is one obvious place to
+    # look for it. nginx still gets its copy from the conf secret below.
     # ---------------------------------------------------------------------
 
     - name: Look for an existing nginx config secret
@@ -99,13 +85,20 @@
       ansible.builtin.set_fact:
         write_token: "{{ token_supplied or not token_secret_exists or openflake_rotate_token }}"
 
-    # 64 hex chars, the same shape as `openssl rand -hex 32`.
+    # 64 hex chars, the same shape as `openssl rand -hex 32`. When the token is
+    # being reused it gets read back out of the rendered nginx config, so this
+    # is always the live value — the env secret and the final report can both
+    # rely on it whether or not a new token was minted this run.
     - name: Settle on the token value
       ansible.builtin.set_fact:
         effective_token: >-
           {{ openflake_bearer_token if token_supplied
-             else lookup('password', '/dev/null chars=hexdigits length=64') | lower }}
-      when: write_token
+             else (lookup('password', '/dev/null chars=hexdigits length=64') | lower
+                   if write_token
+                   else (existing_nginx_conf.resources[0].data['default.conf']
+                         | b64decode
+                         | regex_findall('expected_token "([^"]+)"')
+                         | first)) }}
       no_log: true
 
     # Rendered from nginx/default.conf.template rather than inlined here, so
@@ -127,6 +120,27 @@
               {{ lookup('file', repo_root ~ '/nginx/default.conf.template')
                  | replace('REPLACE_ME', effective_token) }}
       when: write_token
+      no_log: true
+
+    - name: Write the OpenFlake connection secret
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ openflake_namespace }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ app_name }}-env"
+            labels:
+              app: "{{ app_name }}"
+          type: Opaque
+          stringData:
+            OPENFLAKE_INSTANCE_URL: "{{ openflake_instance_url_norm }}"
+            OPENFLAKE_USERNAME: "{{ openflake_username }}"
+            OPENFLAKE_PASSWORD: "{{ openflake_password }}"
+            # start.py does not read this — it is here so the token has one
+            # obvious home next to the other connection details.
+            OPENFLAKE_BEARER_TOKEN: "{{ effective_token }}"
       no_log: true
 
     # ---------------------------------------------------------------------
@@ -236,15 +250,18 @@
       ansible.builtin.debug:
         msg:
           - "Endpoint:  {{ endpoint }}/mcp"
-          - "Header:    Authorization: Bearer <token>"
+          - "Header:    Authorization: Bearer {{ effective_token }}"
           - "Namespace: {{ openflake_namespace }}"
           - "Instance:  {{ openflake_instance_url_norm }}"
           - "Built:     {{ openflake_git_ref }} @ {{ openflake_git_uri }}"
           - "Gate:      unauthenticated request returned 401"
           - >-
-            {{ 'Token: ' ~ effective_token ~ '  -- SAVE THIS NOW, it is not recoverable, only replaceable.'
-               if write_token
-               else 'Token: unchanged. Set openflake_rotate_token=true to mint a new one.' }}
+            {{ 'Token: newly minted this run.' if write_token
+               else 'Token: unchanged from the previous run.' }}
+            Also stored as OPENFLAKE_BEARER_TOKEN in the
+            {{ app_name }}-env secret:
+            oc get secret {{ app_name }}-env -n {{ openflake_namespace }}
+            -o jsonpath='{.data.OPENFLAKE_BEARER_TOKEN}' | base64 -d
           - >-
             Credentials are not verified by this playbook. A running pod only
             proves the three env vars are present. Make one real tool call --
